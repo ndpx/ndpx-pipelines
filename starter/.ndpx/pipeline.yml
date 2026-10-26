@@ -1,0 +1,11 @@
+# ndpx pipeline configuration. Changes require Code Reviewer approval.
+risk_tier: 2 # 1 low, 2 medium, 3 high (Software Delivery Standard). Payment or personal data: 2 or higher.
+owner: '' # person accountable for this code
+description: ''
+
+python:
+  version: '3.12' # AWS Glue 5.0 uses 3.11; match your runtime
+
+sql:
+  dialect: ansi # oracle | sparksql | athena | postgres | mysql | tsql | ansi
+  lint: advisory # advisory: report only. blocking: every SQL file must parse.

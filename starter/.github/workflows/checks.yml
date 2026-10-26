@@ -1,0 +1,28 @@
+# ndpx code checks. All logic lives in ndpx-pipelines; do not add checks here.
+name: checks
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ndpx:
+    uses: ndpx/ndpx-pipelines/.github/workflows/code-checks.yml@v1
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    with:
+      pipelines-ref: v1
+      code-reviewers: ${{ vars.CODE_REVIEWERS }}
+      require-ai-review: ${{ vars.REQUIRE_AI_REVIEW || 'false' }}
+      ai-review-model: ${{ vars.AI_REVIEW_MODEL }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,358 @@
+# ndpx universal code checks.
+# For any repository: scripts, SQL, AWS Glue jobs, Docker tools, services.
+# Detects what the repository contains and runs only the matching checks.
+# The web pipeline (pr-checks.yml) calls this workflow too, so every repository gets the same baseline checks.
+# The single required status check for branch rules is the job "result".
+name: ndpx code checks
+
+on:
+  workflow_call:
+    inputs:
+      pipelines-ref:
+        description: Ref of ndpx-pipelines to load scripts and config from. Keep equal to the ref in `uses:`.
+        type: string
+        default: v1
+      # Repository variables of the calling repo, passed explicitly.
+      code-reviewers:
+        type: string
+        default: ""
+      require-ai-review:
+        type: string
+        default: "false"
+      ai-review-model:
+        type: string
+        default: ""
+      profile:
+        description: >-
+          "general" for any repository. "web" when called from pr-checks.yml: adds TypeScript/React rules,
+          uses the web review rubric, and leaves npm checks to the web pipeline's code job.
+        type: string
+        default: general
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+
+permissions: {}
+
+env:
+  PIPELINES_REPO: ndpx/ndpx-pipelines
+  GITLEAKS_VERSION: "8.30.1"
+  SEMGREP_VERSION: "1.182.1"
+  HADOLINT_VERSION: "2.15.1"
+  HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
+  TRIVY_VERSION: "0.76.1"
+  RUFF_VERSION: "0.17.2"
+  BANDIT_VERSION: "1.9.4"
+  PIP_AUDIT_VERSION: "2.10.1"
+  SQLFLUFF_VERSION: "4.4.0"
+  PYYAML_VERSION: "6.0.3"
+
+jobs:
+  detect:
+    name: Detect repository content
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.d.outputs.summary }}
+      has_python: ${{ steps.d.outputs.has_python }}
+      has_python_tests: ${{ steps.d.outputs.has_python_tests }}
+      python_version: ${{ steps.d.outputs.python_version }}
+      python_requirements: ${{ steps.d.outputs.python_requirements }}
+      has_sql: ${{ steps.d.outputs.has_sql }}
+      sql_dialect: ${{ steps.d.outputs.sql_dialect }}
+      sql_lint: ${{ steps.d.outputs.sql_lint }}
+      has_docker: ${{ steps.d.outputs.has_docker }}
+      dockerfiles: ${{ steps.d.outputs.dockerfiles }}
+      has_npm: ${{ steps.d.outputs.has_npm }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - id: d
+        run: python .ndpx-pipelines/scripts/detect_stack.py
+
+  secrets:
+    name: "C06 Secret scanning"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$file" "$base/$file"
+          curl -sSfL -o checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $file\$" checksums.txt | sha256sum --check -
+          tar -xzf "$file" gitleaks
+      - name: Scan commits in this pull request
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./gitleaks git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" .
+      - name: Scan all files
+        run: ./gitleaks dir --redact --verbose .
+
+  sast:
+    name: "C07 Static analysis"
+    needs: detect
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install "semgrep==${SEMGREP_VERSION}"
+      - name: Semgrep
+        env:
+          HAS_PY: ${{ needs.detect.outputs.has_python }}
+          HAS_DOCKER: ${{ needs.detect.outputs.has_docker }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          configs=(--config p/default --config p/secrets --config p/sql-injection)
+          [ "$PROFILE" = "web" ] && configs+=(--config p/typescript --config p/react)
+          [ "$HAS_PY" = "true" ] && configs+=(--config p/python)
+          [ "$HAS_DOCKER" = "true" ] && configs+=(--config p/dockerfile)
+          semgrep scan --error --metrics=off "${configs[@]}" \
+            --exclude node_modules --exclude .venv --exclude dist --exclude build --exclude coverage --exclude .ndpx-pipelines
+
+  python:
+    name: "Python: errors, security lint, dependencies, tests"
+    needs: detect
+    if: needs.detect.outputs.has_python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ needs.detect.outputs.python_version }}
+      - run: pip install "ruff==${RUFF_VERSION}" "bandit==${BANDIT_VERSION}" "pip-audit==${PIP_AUDIT_VERSION}"
+      - name: Syntax errors and undefined names (blocking)
+        run: ruff check --select E9,F63,F7,F82 --output-format=github --exclude .ndpx-pipelines .
+      - name: General lint (advisory)
+        continue-on-error: true
+        run: ruff check --select E,F,W,B --ignore E501 --output-format=github --exclude .ndpx-pipelines .
+      - name: Security lint, Bandit (blocking on medium+ severity with high confidence)
+        run: bandit -r . -x ./.venv,./venv,./node_modules,./tests,./.ndpx-pipelines --severity-level medium --confidence-level high
+      - name: Vulnerable dependencies
+        env:
+          REQS: ${{ needs.detect.outputs.python_requirements }}
+        run: |
+          files=$(python3 -c 'import json,os,sys; print("\n".join(json.loads(os.environ["REQS"])))')
+          if [ -z "$files" ]; then
+            echo "::warning::No requirements*.txt found. Dependencies cannot be checked. Pin them in requirements.txt."
+            exit 0
+          fi
+          status=0
+          while IFS= read -r f; do
+            echo "== $f"
+            pip-audit --requirement "$f" --disable-pip --no-deps --progress-spinner off || status=1  # requires pinned versions (==)
+          done <<< "$files"
+          exit $status
+      - name: Tests (pytest)
+        if: needs.detect.outputs.has_python_tests == 'true'
+        run: |
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt;
+          elif [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest
+          pytest -q
+
+  sql:
+    name: "SQL: lint and risk report"
+    needs: detect
+    if: needs.detect.outputs.has_sql == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Risky statements (blocking on credentials; others reported for review)
+        run: python3 .ndpx-pipelines/scripts/sql_risk.py
+      - run: pip install "sqlfluff==${SQLFLUFF_VERSION}"
+      - name: SQL lint
+        env:
+          DIALECT: ${{ needs.detect.outputs.sql_dialect }}
+          MODE: ${{ needs.detect.outputs.sql_lint }}
+        run: |
+          set +e
+          git ls-files '*.sql' '*.SQL' | xargs -r sqlfluff lint --dialect "$DIALECT" --format github-annotation-native --nofail
+          if [ "$MODE" = "blocking" ]; then
+            echo "Checking every SQL file parses (sql.lint: blocking)."
+            git ls-files '*.sql' '*.SQL' | xargs -r -n 1 sqlfluff parse --dialect "$DIALECT" > /dev/null
+            exit $?
+          fi
+          echo "SQL lint is advisory for this repository (sql.lint: advisory)."
+
+  docker:
+    name: "Docker: Dockerfile lint, config scan, image scan"
+    needs: detect
+    if: needs.detect.outputs.has_docker == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install hadolint and Trivy (checksum verified)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          h="https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}"
+          curl -sSfL -o "$RUNNER_TEMP/bin/hadolint" "$h/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  $RUNNER_TEMP/bin/hadolint" | sha256sum --check -
+          chmod +x "$RUNNER_TEMP/bin/hadolint"
+          t="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tf="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "$tf" "$t/$tf"
+          curl -sSfL -o trivy_checksums.txt "$t/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " $tf\$" trivy_checksums.txt | sha256sum --check -
+          tar -xzf "$tf" -C "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Dockerfile lint (blocking on errors)
+        env:
+          DOCKERFILES: ${{ needs.detect.outputs.dockerfiles }}
+        run: |
+          python3 -c 'import json,os; print("\n".join(json.loads(os.environ["DOCKERFILES"])))' | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "== $f"; hadolint --failure-threshold error --error DL3007 --error DL3006 "$f"
+          done
+      - name: Configuration scan, Dockerfiles and compose (blocking on high and critical)
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 .
+      - name: Build images and scan for vulnerabilities (blocking on fixable high and critical)
+        env:
+          DOCKERFILES: ${{ needs.detect.outputs.dockerfiles }}
+        run: |
+          set -euo pipefail
+          i=0
+          python3 -c 'import json,os; print("\n".join(json.loads(os.environ["DOCKERFILES"])))' | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            i=$((i+1)); tag="ndpx-ci-image-$i:scan"
+            echo "== build $f"
+            docker build --pull -f "$f" -t "$tag" "$(dirname "$f")"
+            echo "== scan $f"
+            trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$tag"
+          done
+
+  npm:
+    name: "npm: lint, tests, dependencies"
+    needs: detect
+    # Web apps get stricter npm checks (build, coverage, bundle scan, licences) in pr-checks.yml.
+    if: needs.detect.outputs.has_npm == 'true' && inputs.profile != 'web'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install (lockfile required)
+        run: |
+          [ -f package-lock.json ] || { echo "::error::package-lock.json not committed."; exit 1; }
+          npm ci --ignore-scripts
+      - name: Lint and test when defined
+        run: |
+          has() { node -e "process.exit(require('./package.json').scripts?.['$1'] ? 0 : 1)"; }
+          if has lint; then npm run lint; else echo "::warning::No lint script."; fi
+          if has test; then npm test; else echo "::warning::No test script."; fi
+      - name: Vulnerable dependencies (high and critical)
+        run: npm audit --audit-level=high
+
+  ai-review:
+    name: "C15/C16 AI security review"
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - name: Review diff
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REQUIRE_AI_REVIEW: ${{ inputs.require-ai-review }}
+          AI_REVIEW_MODEL: ${{ inputs.ai-review-model }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUBRIC: .ndpx-pipelines/config/${{ inputs.profile == 'web' && 'ai-review-rubric.md' || 'ai-review-rubric-general.md' }}
+        run: >-
+          python3 .ndpx-pipelines/scripts/ai_review.py
+          --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          --rubric "${RUBRIC}"
+          --out findings.json
+      - name: Gate and comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          CODE_REVIEWERS: ${{ inputs.code-reviewers }}
+        run: |
+          set +e
+          python3 .ndpx-pipelines/scripts/ai_gate.py --findings findings.json --report review.md
+          gate=$?
+          set -e
+          python3 .ndpx-pipelines/scripts/pr_comment.py --marker ndpx-ai-review --body-file review.md
+          exit "$gate"
+
+  result:
+    name: result
+    needs: [detect, secrets, sast, python, sql, docker, npm, ai-review]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: All checks must pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e '[to_entries[] | select(.value.result != "success" and .value.result != "skipped")] | length == 0' > /dev/null \
+            || { echo "::error::One or more ndpx checks failed."; exit 1; }

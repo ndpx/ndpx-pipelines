@@ -17,9 +17,11 @@ import check_coverage  # noqa: E402
 import check_db_security as dbsec  # noqa: E402
 import check_headers  # noqa: E402
 import check_licenses  # noqa: E402
+import detect_stack  # noqa: E402
 import jsm_change  # noqa: E402
 import read_config  # noqa: E402
 import scan_bundle  # noqa: E402
+import sql_risk  # noqa: E402
 
 
 def jwt(payload: dict) -> str:
@@ -302,3 +304,73 @@ class TestEnvNames:
 
     def test_allows_public_key_names(self):
         assert not scan_bundle.scan_text("process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "src/a.ts", True)
+
+
+# ---------------------------------------------------------------- detect_stack
+def test_detect_mixed_repo():
+    files = ["jobs/a.py", "tests/test_a.py", "requirements.txt", "sql/001.sql", "wallet/Dockerfile",
+             "docker-compose.yml", "node_modules/x/y.py"]
+    out = detect_stack.detect(files, {"risk_tier": 3, "sql": {"dialect": "oracle", "lint": "blocking"}})
+    assert out["risk_tier"] == "3"
+    assert out["has_python"] == "true" and out["has_python_tests"] == "true"
+    assert json.loads(out["python_requirements"]) == ["requirements.txt"]
+    assert out["has_sql"] == "true" and out["sql_dialect"] == "oracle" and out["sql_lint"] == "blocking"
+    assert out["has_docker"] == "true" and json.loads(out["dockerfiles"]) == ["wallet/Dockerfile"]
+    assert out["has_npm"] == "false"
+
+
+def test_detect_sql_only_defaults():
+    out = detect_stack.detect(["001_setup.sql", "README.md"], {})
+    assert out["has_python"] == "false" and out["has_docker"] == "false"
+    assert out["sql_dialect"] == "ansi" and out["sql_lint"] == "advisory" and out["risk_tier"] == "2"
+    assert out["summary"] == "SQL"
+
+
+@pytest.mark.parametrize("cfg", [{"risk_tier": 5}, {"sql": {"dialect": "cobol"}}, {"sql": {"lint": "sometimes"}}])
+def test_detect_rejects_bad_config(cfg):
+    with pytest.raises(ValueError):
+        detect_stack.detect(["a.sql"], cfg)
+
+
+def test_detect_requires_config(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    assert detect_stack.main(["--root", str(tmp_path)]) == 1
+
+
+# ---------------------------------------------------------------- sql_risk
+def test_sql_risk_blocks_password():
+    blocks, _ = sql_risk.scan("a.sql", "CREATE USER r IDENTIFIED BY \"Sup3rSecret!\";\n")
+    assert blocks and "IDENTIFIED BY" in blocks[0]
+
+
+def test_sql_risk_ignores_commented_password():
+    blocks, reviews = sql_risk.scan("a.sql", "-- CREATE USER r IDENTIFIED BY secret1;\nSELECT 1;\n")
+    assert blocks == [] and reviews == []
+
+
+def test_sql_risk_flags_risky_statements():
+    sql = "DROP TABLE t;\nDELETE FROM t;\nUPDATE t SET a = 1;\nGRANT SELECT ON t TO r;\nTRUNCATE TABLE t;\n"
+    _, reviews = sql_risk.scan("a.sql", sql)
+    text = "\n".join(reviews)
+    for label in ("DROP", "DELETE without WHERE", "UPDATE without WHERE", "GRANT/REVOKE", "TRUNCATE"):
+        assert label in text
+
+
+def test_sql_risk_allows_safe_changes():
+    sql = "DELETE FROM t WHERE id = 1;\nUPDATE t\n  SET a = 1\n  WHERE id = 2;\nSELECT * FROM t;\n"
+    blocks, reviews = sql_risk.scan("a.sql", sql)
+    assert blocks == [] and reviews == []
+
+
+def test_sql_risk_exit_code(tmp_path):
+    bad = tmp_path / "bad.sql"
+    bad.write_text("ALTER USER app IDENTIFIED BY 'abcd1234';\n")
+    good = tmp_path / "good.sql"
+    good.write_text("DROP VIEW v;\n")
+    assert sql_risk.main([str(bad)]) == 1
+    assert sql_risk.main([str(good)]) == 0
+
+
+def test_detect_supabase_defaults_to_postgres():
+    out = detect_stack.detect(["package.json", "supabase/migrations/001.sql"], {"risk_tier": 2})
+    assert out["sql_dialect"] == "postgres" and out["has_npm"] == "true"

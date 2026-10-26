@@ -1,6 +1,8 @@
 # ndpx central pull request checks.
 # Called from every app repository. Do not copy this file into app repositories.
-# The single required status check for branch rules is the job "result".
+# Runs the common checks (code-checks.yml) plus web-only stages: build and bundle scan, coverage, licences,
+# database migrations and RLS tests, Netlify preview, security headers and OWASP ZAP.
+# The single required status check for branch rules is the top-level job "result".
 name: ndpx PR checks
 
 on:
@@ -42,8 +44,6 @@ permissions: {}
 
 env:
   PIPELINES_REPO: ndpx/ndpx-pipelines
-  GITLEAKS_VERSION: "8.30.1"
-  SEMGREP_VERSION: "1.182.1"
   SUPABASE_CLI_VERSION: "2.122.0"
   NETLIFY_CLI_VERSION: "27.14.2"
   PSYCOPG_VERSION: "3.3.6"
@@ -141,55 +141,23 @@ jobs:
           --allow .ndpx-pipelines/config/licenses.txt
           --exceptions .ndpx/license-exceptions.txt
 
-  secrets:
-    name: "C06 Secret scanning"
-    runs-on: ubuntu-latest
+  common:
+    # Baseline checks shared with every ndpx repository: secrets, Semgrep, Python/SQL/Docker content, AI review.
+    # The ref here must match pipelines-ref. Both move together when a new major version (v2) is released.
+    name: Common checks
+    uses: ndpx/ndpx-pipelines/.github/workflows/code-checks.yml@v1 # zizmor: ignore[unpinned-uses] own repository, moves with v1
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install gitleaks (checksum verified)
-        run: |
-          set -euo pipefail
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$file" "$base/$file"
-          curl -sSfL -o checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          grep " $file\$" checksums.txt | sha256sum --check -
-          tar -xzf "$file" gitleaks
-      - name: Scan commits in this pull request
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: ./gitleaks git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" .
-      - name: Scan working tree
-        run: ./gitleaks dir --redact --verbose .
-
-  sast:
-    name: "C07 Static analysis"
-    needs: config
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.13"
-      - run: pip install "semgrep==${SEMGREP_VERSION}"
-      - name: Semgrep
-        env:
-          BUILD_DIR: ${{ needs.config.outputs.build_dir }}
-        run: >-
-          semgrep scan --error --metrics=off
-          --config p/default --config p/typescript --config p/react
-          --config p/secrets --config p/sql-injection
-          --exclude "$BUILD_DIR" --exclude node_modules --exclude coverage
+      pull-requests: write
+      issues: read
+    with:
+      pipelines-ref: ${{ inputs.pipelines-ref }}
+      code-reviewers: ${{ inputs.code-reviewers }}
+      require-ai-review: ${{ inputs.require-ai-review }}
+      ai-review-model: ${{ inputs.ai-review-model }}
+      profile: web
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
   database:
     name: "Database: migrations, RLS tests, security checks"
@@ -247,52 +215,6 @@ jobs:
           python .ndpx-pipelines/scripts/check_db_security.py
           --dsn postgresql://postgres:postgres@127.0.0.1:54322/postgres
           --config .ndpx/pipeline.yml
-
-  ai-review:
-    name: "C15/C16 AI security review"
-    # Same-repository pull requests only. Fork PRs never receive the API key.
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.PIPELINES_REPO }}
-          ref: ${{ inputs.pipelines-ref }}
-          path: .ndpx-pipelines
-          persist-credentials: false
-      - name: Review diff
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          REQUIRE_AI_REVIEW: ${{ inputs.require-ai-review }}
-          AI_REVIEW_MODEL: ${{ inputs.ai-review-model }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 .ndpx-pipelines/scripts/ai_review.py
-          --base "${BASE_SHA}" --head "${HEAD_SHA}"
-          --rubric .ndpx-pipelines/config/ai-review-rubric.md
-          --out findings.json
-      - name: Gate and comment
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          CODE_REVIEWERS: ${{ inputs.code-reviewers }}
-        run: |
-          set +e
-          python3 .ndpx-pipelines/scripts/ai_gate.py --findings findings.json --report review.md
-          gate=$?
-          set -e
-          python3 .ndpx-pipelines/scripts/pr_comment.py --marker ndpx-ai-review --body-file review.md
-          exit "$gate"
 
   preview:
     name: "Preview deploy, headers and DAST"
@@ -402,7 +324,7 @@ jobs:
 
   result:
     name: result
-    needs: [config, code, secrets, sast, database, ai-review, preview]
+    needs: [config, code, common, database, preview]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
