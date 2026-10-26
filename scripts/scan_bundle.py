@@ -5,7 +5,7 @@ Blocks on:
   - Supabase secret keys (sb_secret_...) or JWTs whose role is service_role
   - Postgres connection strings with credentials
   - Private key blocks
-  - Environment variables exposed to the browser (VITE_*) whose names suggest secrets
+  - Environment variables exposed to the browser (VITE_, NEXT_PUBLIC_, REACT_APP_ and similar) whose names suggest secrets
 
 Usage: scan_bundle.py --dist dist [--src src]
 """
@@ -22,7 +22,7 @@ JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{
 SB_SECRET_RE = re.compile(r"sb_secret_[A-Za-z0-9_-]{10,}")
 PG_DSN_RE = re.compile(r"postgres(?:ql)?://[^\s:'\"/]+:[^\s@'\"]+@[^\s'\"]+")
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----")
-SECRET_ENV_RE = re.compile(r"\bVITE_[A-Z0-9_]*(?:SECRET|SERVICE_ROLE|SERVICE_KEY|PRIVATE|PASSWORD|DB_URL)[A-Z0-9_]*\b")
+SECRET_ENV_RE = re.compile(r"\b(?:VITE_|NEXT_PUBLIC_|REACT_APP_|PUBLIC_|NUXT_PUBLIC_|EXPO_PUBLIC_|GATSBY_)[A-Z0-9_]*(?:SECRET|SERVICE_ROLE|SERVICE_KEY|PRIVATE|PASSWORD|DB_URL)[A-Z0-9_]*\b")
 TEXT_EXT = {".js", ".mjs", ".cjs", ".html", ".css", ".json", ".map", ".txt", ".ts", ".tsx", ".jsx", ".env", ".toml", ".yml", ".yaml"}
 
 

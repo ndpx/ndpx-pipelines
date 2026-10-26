@@ -67,7 +67,7 @@ jobs:
               echo "::error::A Change Request key is required for production."; exit 1
             fi
           fi
-          for v in NETLIFY_AUTH_TOKEN NETLIFY_SITE_ID SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_PROJECT_REF; do
+          for v in NETLIFY_AUTH_TOKEN NETLIFY_SITE_ID; do
             if [ -z "${!v}" ]; then echo "::error::$v is not set for environment $TARGET."; exit 1; fi
           done
 
@@ -81,30 +81,48 @@ jobs:
           path: .ndpx-pipelines
           persist-credentials: false
 
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Read config
+        id: cfg
+        run: |
+          pip install "pyyaml==6.0.3"
+          python .ndpx-pipelines/scripts/read_config.py .ndpx/pipeline.yml
+
       - name: "C29 CAB approval verified in Jira Service Management"
         if: inputs.environment == 'production'
         run: python3 .ndpx-pipelines/scripts/jsm_change.py verify --issue "$CHANGE_REQUEST" --commit "$COMMIT_SHA"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: ${{ steps.cfg.outputs.node_version }}
           cache: npm
       - name: Build
         env:
-          VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
-          VITE_APP_NAME: ${{ vars.APP_NAME }}
+          PREFIX: ${{ steps.cfg.outputs.env_prefix }}
+          PUBLIC_URL_VALUE: ${{ vars.SUPABASE_URL }}
+          PUBLIC_KEY_VALUE: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          APP_NAME_VALUE: ${{ vars.APP_NAME }}
+          BUILD_DIR: ${{ steps.cfg.outputs.build_dir }}
+          SRC_DIR: ${{ steps.cfg.outputs.src_dir }}
         run: |
+          export "${PREFIX}SUPABASE_URL=${PUBLIC_URL_VALUE}" "${PREFIX}SUPABASE_PUBLISHABLE_KEY=${PUBLIC_KEY_VALUE}" "${PREFIX}APP_NAME=${APP_NAME_VALUE}"
           npm ci --ignore-scripts
           npm run build
-          python3 .ndpx-pipelines/scripts/scan_bundle.py --dist dist --src src
+          python3 .ndpx-pipelines/scripts/scan_bundle.py --dist "$BUILD_DIR" --src "$SRC_DIR"
 
       - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+        if: steps.cfg.outputs.has_supabase == 'true'
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
       - name: Database migrations (dry run, then apply)
+        if: steps.cfg.outputs.has_supabase == 'true'
         run: |
           set -euo pipefail
+          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_PROJECT_REF; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set for environment $TARGET."; exit 1; fi
+          done
           supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
           {
             echo "### Database migrations for $TARGET"
@@ -120,10 +138,12 @@ jobs:
 
       - name: Deploy frontend to Netlify
         id: deploy
+        env:
+          BUILD_DIR: ${{ steps.cfg.outputs.build_dir }}
         run: |
           set -euo pipefail
           msg="${COMMIT_SHA:0:7} ${CHANGE_REQUEST:-staging}"
-          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --prod --dir dist --site "$NETLIFY_SITE_ID" \
+          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --prod --dir "$BUILD_DIR" --site "$NETLIFY_SITE_ID" \
             --auth "$NETLIFY_AUTH_TOKEN" --message "$msg" --json > deploy.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json

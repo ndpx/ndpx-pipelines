@@ -6,6 +6,32 @@ App repositories call these workflows. They do not copy them. A fix here applies
 This repository contains no secrets and no ndpx data. It is public so that private app repositories can load
 its workflows and scripts without extra credentials.
 
+## Platform contract
+
+Any npm-based web app can use this pipeline. The ndpx template is the easiest starting point, not a requirement.
+The `config` job checks the contract first and fails with a clear message when something is missing.
+
+| Requirement | Detail |
+|---|---|
+| `.ndpx/pipeline.yml` | `risk_tier` (1–3). Optional: `build_dir` (default `dist`), `src_dir` (`src`), `env_prefix` (`VITE_`), `node_version`, `coverage_lines`, `database.*`. |
+| npm + committed `package-lock.json` | `npm ci` must work. |
+| npm scripts | Required: `build`, `lint`, `test:coverage`. Run when present: `format:check`, `typecheck`. |
+| Coverage summary | `test:coverage` writes `coverage/coverage-summary.json` (Vitest reporter `json-summary`; Jest `--coverageReporters=json-summary`). Minimum by tier: 0 / 70 / 80 %. |
+| Supabase | Apps that depend on `@supabase/*` must have `supabase/config.toml`, migrations in `supabase/migrations/` and pgTAP tests in `supabase/tests/`. Apps without Supabase skip the database job. |
+| Browser variables | The pipeline sets `<env_prefix>SUPABASE_URL` and `<env_prefix>SUPABASE_PUBLISHABLE_KEY` at build time. |
+| Netlify headers | `netlify.toml` (or `_headers`) must set HSTS, CSP with `frame-ancestors`, `X-Content-Type-Options` and `Referrer-Policy`; checked on every preview and deploy. |
+
+### Bringing an existing app onto the platform
+
+1. Create a private repository in the `ndpx` organisation and push the code.
+2. Copy from the template: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/CODEOWNERS`,
+   `.github/pull_request_template.md`, `.ndpx/`, `netlify.toml` (headers section), `AGENTS.md`, `CLAUDE.md`.
+3. Set `build_dir`, `src_dir` and `env_prefix` in `.ndpx/pipeline.yml` for the framework.
+4. Add the npm scripts above.
+5. If it uses Supabase: `npx supabase init`, `npx supabase link --project-ref <dev-ref>`, `npx supabase db pull`
+   to capture the schema as a baseline migration, then write pgTAP access tests.
+6. Open a pull request. The first run lists everything to fix. Fix security blockers first.
+
 ## Workflows
 
 | Workflow | Called by | Does |
@@ -25,7 +51,8 @@ its workflows and scripts without extra credentials.
 | `check_headers.py` | Security headers and smoke test on a deployed URL. |
 | `netlify_site.py` | Captures the published deploy and restores it on rollback. |
 | `pr_comment.py` | Upserts pipeline comments on the pull request. |
-| `read_config.py` | Reads the app's `.ndpx/pipeline.yml` (risk tier sets the coverage minimum). |
+| `read_config.py` | Checks the platform contract and reads `.ndpx/pipeline.yml` (risk tier sets the coverage minimum). |
+| `check_coverage.py` | Enforces the tier's line-coverage minimum from the Istanbul summary (any test runner). |
 
 ## Configuration expected in each app repository
 

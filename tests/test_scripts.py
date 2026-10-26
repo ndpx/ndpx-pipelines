@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import ai_gate  # noqa: E402
 import ai_review  # noqa: E402
+import check_coverage  # noqa: E402
 import check_db_security as dbsec  # noqa: E402
 import check_headers  # noqa: E402
 import check_licenses  # noqa: E402
@@ -217,7 +218,7 @@ class TestJsm:
         assert jsm_change.main(["verify", "--issue", "CHG-1", "--commit", "abc"]) == 1
 
 
-# ---------------------------------------------------------------- config
+# ---------------------------------------------------------------- config and platform contract
 class TestConfig:
     def test_tier_minimum_coverage(self):
         assert read_config.resolve({"risk_tier": 2})["coverage_lines"] == "70"
@@ -230,3 +231,74 @@ class TestConfig:
     def test_invalid_tier(self):
         with pytest.raises(ValueError):
             read_config.resolve({"risk_tier": 5})
+
+    def test_framework_settings(self):
+        out = read_config.resolve({"build_dir": "out/", "src_dir": "app", "env_prefix": "NEXT_PUBLIC_"})
+        assert (out["build_dir"], out["src_dir"], out["env_prefix"]) == ("out", "app", "NEXT_PUBLIC_")
+
+    @pytest.mark.parametrize("bad", [{"build_dir": "../etc"}, {"build_dir": "a b"}, {"env_prefix": "vite_"}, {"env_prefix": "X;rm"}])
+    def test_rejects_unsafe_settings(self, bad):
+        with pytest.raises(ValueError):
+            read_config.resolve(bad)
+
+
+def make_repo(tmp_path, scripts, deps=None, supabase=False, tests=True, lock=True):
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": scripts, "dependencies": deps or {}}))
+    if lock:
+        (tmp_path / "package-lock.json").write_text("{}")
+    if supabase:
+        (tmp_path / "supabase").mkdir()
+        (tmp_path / "supabase" / "config.toml").write_text("")
+        if tests:
+            (tmp_path / "supabase" / "tests").mkdir()
+    return str(tmp_path)
+
+
+FULL = {"build": "x", "lint": "x", "test:coverage": "x", "format:check": "x", "typecheck": "x"}
+
+
+class TestContract:
+    def test_template_shape_passes(self, tmp_path):
+        out, errors, warnings = read_config.inspect_repo(make_repo(tmp_path, FULL, {"@supabase/supabase-js": "2"}, supabase=True))
+        assert errors == [] and warnings == []
+        assert out["has_supabase"] == "true"
+
+    def test_non_template_app_without_optional_scripts(self, tmp_path):
+        scripts = {"build": "next build", "lint": "next lint", "test:coverage": "jest --coverage"}
+        out, errors, warnings = read_config.inspect_repo(make_repo(tmp_path, scripts))
+        assert errors == []
+        assert len(warnings) == 2 and out["has_typecheck"] == "false" and out["has_supabase"] == "false"
+
+    def test_missing_required_scripts_and_lockfile(self, tmp_path):
+        _, errors, _ = read_config.inspect_repo(make_repo(tmp_path, {"build": "x"}, lock=False))
+        assert len(errors) == 3  # lockfile, lint, test:coverage
+
+    def test_supabase_used_without_migrations_fails(self, tmp_path):
+        _, errors, _ = read_config.inspect_repo(make_repo(tmp_path, FULL, {"@supabase/supabase-js": "2"}))
+        assert any("supabase/ folder" in e for e in errors)
+
+    def test_supabase_without_tests_fails(self, tmp_path):
+        _, errors, _ = read_config.inspect_repo(make_repo(tmp_path, FULL, {}, supabase=True, tests=False))
+        assert any("supabase/tests" in e for e in errors)
+
+
+class TestCoverage:
+    def test_pct(self):
+        assert check_coverage.line_pct({"total": {"lines": {"pct": 81.5}}}) == 81.5
+        assert check_coverage.line_pct({"total": {"lines": {"pct": "Unknown"}}}) == 100.0
+
+    def test_threshold(self, tmp_path):
+        f = tmp_path / "s.json"
+        f.write_text(json.dumps({"total": {"lines": {"pct": 65}}}))
+        assert check_coverage.main(["--summary", str(f), "--min", "70"]) == 1
+        assert check_coverage.main(["--summary", str(f), "--min", "60"]) == 0
+        assert check_coverage.main(["--summary", str(tmp_path / "missing.json"), "--min", "0"]) == 1
+
+
+class TestEnvNames:
+    @pytest.mark.parametrize("name", ["NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY", "REACT_APP_DB_PASSWORD", "VITE_STRIPE_SECRET"])
+    def test_flags_secret_like_public_vars(self, name):
+        assert scan_bundle.scan_text(f"process.env.{name}", "src/a.ts", True)
+
+    def test_allows_public_key_names(self):
+        assert not scan_bundle.scan_text("process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "src/a.ts", True)
