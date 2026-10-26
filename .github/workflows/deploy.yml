@@ -20,6 +20,19 @@ on:
       pipelines-ref:
         type: string
         default: v1
+    # Declared individually instead of `secrets: inherit`. Values come from the GitHub
+    # environment ("staging" / "production") set on the job below; callers pass nothing.
+    secrets:
+      NETLIFY_AUTH_TOKEN:
+        required: false
+      NETLIFY_SITE_ID:
+        required: false
+      SUPABASE_ACCESS_TOKEN:
+        required: false
+      SUPABASE_DB_PASSWORD:
+        required: false
+      JSM_API_TOKEN:
+        required: false
 
 permissions: {}
 
@@ -112,10 +125,11 @@ jobs:
           npm run build
           python3 .ndpx-pipelines/scripts/scan_bundle.py --dist "$BUILD_DIR" --src "$SRC_DIR"
 
-      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+      - name: Install Supabase CLI (npm, checksum-verified binary)
         if: steps.cfg.outputs.has_supabase == 'true'
-        with:
-          version: ${{ env.SUPABASE_CLI_VERSION }}
+        run: |
+          npm install --no-fund --no-audit --prefix "$RUNNER_TEMP/supabase-cli" "supabase@${SUPABASE_CLI_VERSION}"
+          echo "$RUNNER_TEMP/supabase-cli/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Database migrations (dry run, then apply)
         if: steps.cfg.outputs.has_supabase == 'true'
         run: |
