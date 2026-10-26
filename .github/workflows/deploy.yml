@@ -1,0 +1,175 @@
+# ndpx central deployment: staging and production.
+# Production runs only against an approved Jira Service Management Change Request
+# that names the exact commit being deployed.
+#
+# Requires GitHub environments "staging" and "production" in the app repository
+# (GitHub Team plan or above for private repositories).
+name: ndpx deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: staging or production
+        type: string
+        required: true
+      change-request:
+        description: Jira Service Management Change Request key (production only), e.g. CHG-123
+        type: string
+        default: ""
+      pipelines-ref:
+        type: string
+        default: v1
+
+permissions: {}
+
+env:
+  PIPELINES_REPO: ndpx/ndpx-pipelines
+  SUPABASE_CLI_VERSION: "2.122.0"
+  NETLIFY_CLI_VERSION: "27.14.2"
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ inputs.environment }}
+      CHANGE_REQUEST: ${{ inputs.change-request }}
+      COMMIT_SHA: ${{ github.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+      JSM_BASE_URL: ${{ vars.JSM_BASE_URL }}
+      JSM_EMAIL: ${{ vars.JSM_EMAIL }}
+      JSM_API_TOKEN: ${{ secrets.JSM_API_TOKEN }}
+      JSM_APPROVED_STATUSES: ${{ vars.JSM_APPROVED_STATUSES }}
+      JSM_COMMIT_FIELD: ${{ vars.JSM_COMMIT_FIELD }}
+      JSM_WINDOW_START_FIELD: ${{ vars.JSM_WINDOW_START_FIELD }}
+      JSM_WINDOW_END_FIELD: ${{ vars.JSM_WINDOW_END_FIELD }}
+    steps:
+      - name: Validate request
+        run: |
+          case "$TARGET" in staging|production) ;; *) echo "::error::Unknown environment '$TARGET'"; exit 1;; esac
+          if [ "$TARGET" = "production" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Production deploys run from main only (got $GITHUB_REF)."; exit 1
+            fi
+            if [ -z "$CHANGE_REQUEST" ]; then
+              echo "::error::A Change Request key is required for production."; exit 1
+            fi
+          fi
+          for v in NETLIFY_AUTH_TOKEN NETLIFY_SITE_ID SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_PROJECT_REF; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set for environment $TARGET."; exit 1; fi
+          done
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+
+      - name: "C29 CAB approval verified in Jira Service Management"
+        if: inputs.environment == 'production'
+        run: python3 .ndpx-pipelines/scripts/jsm_change.py verify --issue "$CHANGE_REQUEST" --commit "$COMMIT_SHA"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          VITE_APP_NAME: ${{ vars.APP_NAME }}
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          python3 .ndpx-pipelines/scripts/scan_bundle.py --dist dist --src src
+
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Database migrations (dry run, then apply)
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+          {
+            echo "### Database migrations for $TARGET"
+            echo '```'
+            supabase db push --dry-run --password "$SUPABASE_DB_PASSWORD"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          supabase db push --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Record currently published frontend (for rollback)
+        id: before
+        run: echo "deploy_id=$(python3 .ndpx-pipelines/scripts/netlify_site.py current --site "$NETLIFY_SITE_ID")" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy frontend to Netlify
+        id: deploy
+        run: |
+          set -euo pipefail
+          msg="${COMMIT_SHA:0:7} ${CHANGE_REQUEST:-staging}"
+          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --prod --dir dist --site "$NETLIFY_SITE_ID" \
+            --auth "$NETLIFY_AUTH_TOKEN" --message "$msg" --json > deploy.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          d = json.load(open("deploy.json"))
+          print(f"url={d.get('url') or d.get('deploy_url')}")
+          print(f"deploy_id={d.get('deploy_id', '')}")
+          PY
+
+      - name: "C32 Smoke test and security headers"
+        id: smoke
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: python3 .ndpx-pipelines/scripts/check_headers.py --url "$URL" --smoke
+
+      - name: Roll back frontend on failed smoke test
+        if: failure() && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'failure'
+        env:
+          PREVIOUS: ${{ steps.before.outputs.deploy_id }}
+        run: |
+          python3 .ndpx-pipelines/scripts/netlify_site.py restore --site "$NETLIFY_SITE_ID" --deploy "$PREVIOUS"
+          echo "::warning::Frontend rolled back. Database migrations are NOT rolled back automatically; follow the runbook."
+
+      - name: Record outcome on the Change Request
+        if: always() && inputs.environment == 'production' && inputs.change-request != ''
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          OUTCOME: ${{ job.status == 'success' && 'success' || (steps.smoke.outcome == 'failure' && 'rolled-back' || 'failed') }}
+        run: >-
+          python3 .ndpx-pipelines/scripts/jsm_change.py record --issue "$CHANGE_REQUEST" --commit "$COMMIT_SHA"
+          --result "$OUTCOME" --url "${URL:-}" --run "$RUN_URL" || true
+
+      - name: Release evidence
+        if: always()
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          DEPLOY_ID: ${{ steps.deploy.outputs.deploy_id }}
+        run: |
+          {
+            echo "### Release evidence"
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Environment | $TARGET |"
+            echo "| Commit | \`$COMMIT_SHA\` |"
+            echo "| Change Request | ${CHANGE_REQUEST:-n/a} |"
+            echo "| Netlify deploy | ${DEPLOY_ID:-n/a} |"
+            echo "| URL | ${URL:-n/a} |"
+            echo "| Triggered by | $GITHUB_ACTOR |"
+            echo "| Run | $RUN_URL |"
+          } >> "$GITHUB_STEP_SUMMARY"

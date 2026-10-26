@@ -1,0 +1,353 @@
+# ndpx central pull request checks.
+# Called from every app repository. Do not copy this file into app repositories.
+# The single required status check for branch rules is the job "result".
+name: ndpx PR checks
+
+on:
+  workflow_call:
+    inputs:
+      pipelines-ref:
+        description: Ref of ndpx-pipelines to load scripts and config from. Keep equal to the ref in `uses:`.
+        type: string
+        default: v1
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      NETLIFY_AUTH_TOKEN:
+        required: false
+      NETLIFY_DEV_SITE_ID:
+        required: false
+
+permissions: {}
+
+env:
+  PIPELINES_REPO: ndpx/ndpx-pipelines
+  GITLEAKS_VERSION: "8.30.1"
+  SEMGREP_VERSION: "1.182.1"
+  SUPABASE_CLI_VERSION: "2.122.0"
+  NETLIFY_CLI_VERSION: "27.14.2"
+  PSYCOPG_VERSION: "3.3.6"
+  PYYAML_VERSION: "6.0.3"
+
+jobs:
+  config:
+    name: Read pipeline config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      risk_tier: ${{ steps.cfg.outputs.risk_tier }}
+      coverage_lines: ${{ steps.cfg.outputs.coverage_lines }}
+      node_version: ${{ steps.cfg.outputs.node_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - id: cfg
+        run: python .ndpx-pipelines/scripts/read_config.py .ndpx/pipeline.yml
+
+  code:
+    name: Code quality, tests, bundle and dependencies
+    needs: config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ needs.config.outputs.node_version }}
+          cache: npm
+      - name: Install (lockfile only)
+        run: npm ci --ignore-scripts
+      - name: "C01 Formatting"
+        run: npm run format:check
+      - name: "C02 Linting"
+        run: npm run lint
+      - name: "C03 Type checking"
+        run: npm run typecheck
+      - name: "C04/C05 Unit tests and coverage"
+        env:
+          COVERAGE_LINES: ${{ needs.config.outputs.coverage_lines }}
+        run: npx vitest run --coverage --coverage.thresholds.lines="${COVERAGE_LINES}"
+      - name: Build
+        env:
+          VITE_SUPABASE_URL: https://ci-placeholder.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_placeholder
+        run: npm run build
+      - name: "Bundle scan: no secrets in browser code"
+        run: python3 .ndpx-pipelines/scripts/scan_bundle.py --dist dist --src src
+      - name: "C09 Dependency vulnerabilities (high and critical)"
+        run: npm audit --audit-level=high
+      - name: "C10 Licence compliance"
+        run: >-
+          python3 .ndpx-pipelines/scripts/check_licenses.py
+          --lockfile package-lock.json
+          --allow .ndpx-pipelines/config/licenses.txt
+          --exceptions .ndpx/license-exceptions.txt
+
+  secrets:
+    name: "C06 Secret scanning"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$file" "$base/$file"
+          curl -sSfL -o checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $file\$" checksums.txt | sha256sum --check -
+          tar -xzf "$file" gitleaks
+      - name: Scan commits in this pull request
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./gitleaks git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" .
+      - name: Scan working tree
+        run: ./gitleaks dir --redact --verbose .
+
+  sast:
+    name: "C07 Static analysis"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install "semgrep==${SEMGREP_VERSION}"
+      - name: Semgrep
+        run: >-
+          semgrep scan --error --metrics=off
+          --config p/default --config p/typescript --config p/react
+          --config p/secrets --config p/sql-injection
+          --exclude dist --exclude node_modules --exclude coverage
+
+  database:
+    name: "Database: migrations, RLS tests, security checks"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - name: Applied migrations must not be edited
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed="$(git diff --name-only --diff-filter=MDR "${BASE_SHA}...${HEAD_SHA}" -- supabase/migrations || true)"
+          if [ -n "$changed" ]; then
+            echo "::error::Existing migration files were modified or deleted. Add a new migration instead:"
+            echo "$changed"
+            exit 1
+          fi
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Start local Supabase and apply all migrations
+        env:
+          SUPABASE_AUTH_EXTERNAL_AZURE_CLIENT_ID: ci-placeholder
+          SUPABASE_AUTH_EXTERNAL_AZURE_SECRET: ci-placeholder
+          SUPABASE_AUTH_EXTERNAL_AZURE_URL: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
+        run: supabase start
+      - name: Database lint
+        run: supabase db lint --level warning --fail-on error
+      - name: RLS tests (pgTAP)
+        run: supabase test db
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install "psycopg[binary]==${PSYCOPG_VERSION}" "pyyaml==${PYYAML_VERSION}"
+      - name: Database security checks
+        run: >-
+          python .ndpx-pipelines/scripts/check_db_security.py
+          --dsn postgresql://postgres:postgres@127.0.0.1:54322/postgres
+          --config .ndpx/pipeline.yml
+
+  ai-review:
+    name: "C15/C16 AI security review"
+    # Same-repository pull requests only. Fork PRs never receive the API key.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - name: Review diff
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REQUIRE_AI_REVIEW: ${{ vars.REQUIRE_AI_REVIEW }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 .ndpx-pipelines/scripts/ai_review.py
+          --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          --rubric .ndpx-pipelines/config/ai-review-rubric.md
+          --out findings.json
+      - name: Gate and comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          CODE_REVIEWERS: ${{ vars.CODE_REVIEWERS }}
+        run: |
+          set +e
+          python3 .ndpx-pipelines/scripts/ai_gate.py --findings findings.json --report review.md
+          gate=$?
+          set -e
+          python3 .ndpx-pipelines/scripts/pr_comment.py --marker ndpx-ai-review --body-file review.md
+          exit "$gate"
+
+  preview:
+    name: "Preview deploy, headers and DAST"
+    needs: [code, database]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_DEV_SITE_ID }}
+      REQUIRE_PREVIEW: ${{ vars.REQUIRE_PREVIEW }}
+    steps:
+      - name: Skip when Netlify is not configured
+        id: gate
+        run: |
+          if [ -z "${NETLIFY_AUTH_TOKEN}" ] || [ -z "${NETLIFY_SITE_ID}" ]; then
+            if [ "${REQUIRE_PREVIEW}" = "true" ]; then
+              echo "::error::Preview is required but Netlify secrets are not set."; exit 1
+            fi
+            echo "::warning::Preview skipped: NETLIFY_AUTH_TOKEN or NETLIFY_DEV_SITE_ID not set."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - if: steps.gate.outputs.run == 'true'
+        name: Build against the development Supabase project
+        env:
+          VITE_SUPABASE_URL: ${{ vars.DEV_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.DEV_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          python3 .ndpx-pipelines/scripts/scan_bundle.py --dist dist --src src
+      - if: steps.gate.outputs.run == 'true'
+        id: deploy
+        name: Deploy preview to Netlify
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --dir dist --site "$NETLIFY_SITE_ID" \
+            --auth "$NETLIFY_AUTH_TOKEN" --alias "pr-${PR_NUMBER}" --message "PR ${PR_NUMBER}" --json > deploy.json
+          url="$(python3 -c 'import json;print(json.load(open("deploy.json"))["deploy_url"])')"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.run == 'true'
+        name: Security headers
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: python3 .ndpx-pipelines/scripts/check_headers.py --url "$URL" --smoke
+      - if: steps.gate.outputs.run == 'true'
+        name: "C22 OWASP ZAP baseline scan"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          mkdir -p zap && cp .ndpx-pipelines/config/zap-rules.tsv zap/ && chmod -R 777 zap
+          docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "$URL" -c zap-rules.tsv -I -r zap-report.html
+      - if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-report
+          path: zap/zap-report.html
+          if-no-files-found: ignore
+      - if: steps.gate.outputs.run == 'true'
+        name: Comment preview link
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          printf '### Preview\n\n%s\n\nBuilt against the **development** Supabase project. Fake data only.\n' "$URL" > preview.md
+          python3 .ndpx-pipelines/scripts/pr_comment.py --marker ndpx-preview --body-file preview.md
+
+  result:
+    name: result
+    needs: [config, code, secrets, sast, database, ai-review, preview]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: All checks must pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e '[to_entries[] | select(.value.result != "success" and .value.result != "skipped")] | length == 0' > /dev/null \
+            || { echo "::error::One or more ndpx checks failed."; exit 1; }
