@@ -10,6 +10,26 @@ on:
         description: Ref of ndpx-pipelines to load scripts and config from. Keep equal to the ref in `uses:`.
         type: string
         default: v1
+      # Repository variables of the calling app are passed in explicitly:
+      # a reusable workflow in another repository cannot read the caller's `vars`.
+      dev-supabase-url:
+        type: string
+        default: ""
+      dev-supabase-publishable-key:
+        type: string
+        default: ""
+      code-reviewers:
+        type: string
+        default: ""
+      require-ai-review:
+        type: string
+        default: "false"
+      require-preview:
+        type: string
+        default: "false"
+      ai-review-model:
+        type: string
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: false
@@ -251,8 +271,8 @@ jobs:
       - name: Review diff
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          REQUIRE_AI_REVIEW: ${{ vars.REQUIRE_AI_REVIEW }}
-          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          REQUIRE_AI_REVIEW: ${{ inputs.require-ai-review }}
+          AI_REVIEW_MODEL: ${{ inputs.ai-review-model }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: >-
@@ -265,7 +285,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          CODE_REVIEWERS: ${{ vars.CODE_REVIEWERS }}
+          CODE_REVIEWERS: ${{ inputs.code-reviewers }}
         run: |
           set +e
           python3 .ndpx-pipelines/scripts/ai_gate.py --findings findings.json --report review.md
@@ -288,7 +308,7 @@ jobs:
     env:
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
       NETLIFY_SITE_ID: ${{ secrets.NETLIFY_DEV_SITE_ID }}
-      REQUIRE_PREVIEW: ${{ vars.REQUIRE_PREVIEW }}
+      REQUIRE_PREVIEW: ${{ inputs.require-preview }}
     steps:
       - name: Skip when Netlify is not configured
         id: gate
@@ -322,15 +342,23 @@ jobs:
         name: Build against the development Supabase project
         env:
           PREFIX: ${{ needs.config.outputs.env_prefix }}
-          DEV_URL: ${{ vars.DEV_SUPABASE_URL }}
-          DEV_KEY: ${{ vars.DEV_SUPABASE_PUBLISHABLE_KEY }}
+          DEV_URL: ${{ inputs.dev-supabase-url }}
+          DEV_KEY: ${{ inputs.dev-supabase-publishable-key }}
           BUILD_DIR: ${{ needs.config.outputs.build_dir }}
           SRC_DIR: ${{ needs.config.outputs.src_dir }}
         run: |
+          if [ -z "${DEV_URL}" ] || [ -z "${DEV_KEY}" ]; then
+            echo "::error::dev-supabase-url or dev-supabase-publishable-key is empty. Set DEV_SUPABASE_URL and DEV_SUPABASE_PUBLISHABLE_KEY as repository variables and pass them in ci.yml."
+            exit 1
+          fi
           export "${PREFIX}SUPABASE_URL=${DEV_URL}" "${PREFIX}SUPABASE_PUBLISHABLE_KEY=${DEV_KEY}"
           npm ci --ignore-scripts
           npm run build
           python3 .ndpx-pipelines/scripts/scan_bundle.py --dist "$BUILD_DIR" --src "$SRC_DIR"
+          if ! grep -rqF "${DEV_URL}" "$BUILD_DIR"; then
+            echo "::error::The built app does not contain the Supabase URL. Check env_prefix in .ndpx/pipeline.yml matches the framework."
+            exit 1
+          fi
       - if: steps.gate.outputs.run == 'true'
         id: deploy
         name: Deploy preview to Netlify

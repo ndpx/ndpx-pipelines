@@ -121,9 +121,17 @@ jobs:
           SRC_DIR: ${{ steps.cfg.outputs.src_dir }}
         run: |
           export "${PREFIX}SUPABASE_URL=${PUBLIC_URL_VALUE}" "${PREFIX}SUPABASE_PUBLISHABLE_KEY=${PUBLIC_KEY_VALUE}" "${PREFIX}APP_NAME=${APP_NAME_VALUE}"
+          if [ -z "${PUBLIC_URL_VALUE}" ] || [ -z "${PUBLIC_KEY_VALUE}" ]; then
+            echo "::error::SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY is empty for environment $TARGET. Add them as environment variables."
+            exit 1
+          fi
           npm ci --ignore-scripts
           npm run build
           python3 .ndpx-pipelines/scripts/scan_bundle.py --dist "$BUILD_DIR" --src "$SRC_DIR"
+          if ! grep -rqF "${PUBLIC_URL_VALUE}" "$BUILD_DIR"; then
+            echo "::error::The built app does not contain the Supabase URL. Check env_prefix in .ndpx/pipeline.yml."
+            exit 1
+          fi
 
       - name: Install Supabase CLI (npm, checksum-verified binary)
         if: steps.cfg.outputs.has_supabase == 'true'
