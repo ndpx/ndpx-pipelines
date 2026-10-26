@@ -289,10 +289,17 @@ jobs:
           BUILD_DIR: ${{ needs.config.outputs.build_dir }}
         run: |
           set -euo pipefail
+          EXPECTED_JS="$(grep -oE '[A-Za-z0-9_./-]+\.js' "$BUILD_DIR/index.html" | head -1 || true)"
+          EXPECTED_JS="${EXPECTED_JS:-index.html}"
           npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --dir "$BUILD_DIR" --site "$NETLIFY_SITE_ID" \
             --auth "$NETLIFY_AUTH_TOKEN" --alias "pr-${PR_NUMBER}" --message "PR ${PR_NUMBER}" --json > deploy.json
-          url="$(python3 -c 'import json;print(json.load(open("deploy.json"))["deploy_url"])')"
+          # Use the deploy's own permanent address. The pr-N alias can keep serving an older deploy.
+          url="$(python3 -c 'import json; d = json.load(open("deploy.json")); i, n = d.get("deploy_id"), d.get("site_name"); print(f"https://{i}--{n}.netlify.app" if i and n else d["deploy_url"])')"
+          echo "Preview: ${url}"
           echo "url=${url}" >> "$GITHUB_OUTPUT"
+          if ! curl -sSf "$url/" | grep -qF "${EXPECTED_JS}"; then
+            echo "::error::The preview does not serve the build just made (${EXPECTED_JS})."; exit 1
+          fi
       - if: steps.gate.outputs.run == 'true'
         name: Security headers
         env:
@@ -319,7 +326,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           URL: ${{ steps.deploy.outputs.url }}
         run: |
-          printf '### Preview\n\n%s\n\nBuilt against the **development** Supabase project. Fake data only.\n' "$URL" > preview.md
+          printf '### Preview\n\n%s\n\nThis link is for this commit only. Built against the **development** Supabase project. Fake data only.\n' "$URL" > preview.md
           python3 .ndpx-pipelines/scripts/pr_comment.py --marker ndpx-preview --body-file preview.md
 
   result:
