@@ -1,7 +1,7 @@
 # ndpx AI security review rubric
 
 Context: internal web apps for ndpx staff. Stack: React + TypeScript (Vite), Supabase (Postgres, Auth, Storage,
-Edge Functions), hosted on Netlify. Sign-in is Microsoft Entra ID only. Apps may hold HR and personal data
+Edge Functions), hosted on Netlify. Sign-in is Microsoft Entra ID only. Apps may hold personal and Confidential data
 protected under Brunei's PDPO 2025. Code is often written with AI assistance.
 
 ## Severity guide
