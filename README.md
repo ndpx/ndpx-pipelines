@@ -66,6 +66,13 @@ merges `.gitignore`, and its first pull request also scans the full Git history 
 
 New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.yml`.
 
+### Everyday commands (`tools/ndpx.sh`)
+
+`bash tools/ndpx.sh install` adds an `ndpx` command to Git Bash: `ndpx start "description"` (new branch from the latest
+main), `ndpx check` (local install, lint, tests, build, audit), `ndpx ship "message"` (check, commit, push, PR link; refuses
+on main or a merged branch), `ndpx done` (back to main, delete branch), `ndpx rules` (add the Git workflow rules from
+`templates/git-workflow.md` to AGENTS.md / CLAUDE.md in an existing repository).
+
 ### Design approval (C47)
 
 Tier 2 and 3 repositories need `docs/DESIGN.md` (template in `starter/docs/`) with a `Threat model` section and without the

@@ -351,7 +351,7 @@ jobs:
           done
 
   npm:
-    name: "npm: lint, tests, dependencies"
+    name: "npm: lint, tests, build, dependencies"
     needs: detect
     # Web apps get stricter npm checks (build, coverage, bundle scan, licences) in pr-checks.yml.
     if: needs.detect.outputs.has_npm == 'true' && inputs.profile != 'web'
@@ -362,18 +362,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Node version (from .nvmrc, else 22) and match with Netlify
+        id: node
+        run: |
+          v=""
+          [ -f .nvmrc ] && v="$(tr -d ' \r\nv' < .nvmrc)"
+          [ -z "$v" ] && [ -f .node-version ] && v="$(tr -d ' \r\nv' < .node-version)"
+          v="${v:-22}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ -f netlify.toml ]; then
+            nv="$(grep -E '^[[:space:]]*NODE_VERSION[[:space:]]*=' netlify.toml | head -1 | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)"
+            if [ -n "$nv" ] && [ "${nv%%.*}" != "${v%%.*}" ]; then
+              echo "::error::netlify.toml sets NODE_VERSION=$nv but this check builds with Node $v (.nvmrc or default). Netlify would build differently. Make them match."
+              exit 1
+            fi
+          fi
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: ${{ steps.node.outputs.version }}
       - name: Install (lockfile required)
         run: |
           [ -f package-lock.json ] || { echo "::error::package-lock.json not committed."; exit 1; }
           npm ci --ignore-scripts
-      - name: Lint and test when defined
+      - name: Lint, test and build when defined
         run: |
           has() { node -e "process.exit(require('./package.json').scripts?.['$1'] ? 0 : 1)"; }
           if has lint; then npm run lint; else echo "::warning::No lint script."; fi
           if has test; then npm test; else echo "::warning::No test script."; fi
+          if has build; then npm run build; else echo "No build script."; fi
       - name: Vulnerable dependencies (high and critical)
         run: npm audit --audit-level=high
 
