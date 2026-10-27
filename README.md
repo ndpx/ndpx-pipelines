@@ -44,7 +44,7 @@ The `config` job checks the contract first and fails with a clear message when s
 
 | Content | Blocking | Reported for the Code Reviewer |
 |---|---|---|
-| Everything | Secrets (gitleaks), Semgrep findings, AI review High/Critical (when enabled) | AI review Medium/Low |
+| Everything | Secrets (gitleaks), Semgrep findings, AI review High/Critical (when enabled), design approval for Tier 2–3 (C47) | AI review Medium/Low; SBOM artifact (C19) |
 | Python / Glue | Syntax errors and undefined names (ruff), Bandit medium+ severity, vulnerable pinned packages (pip-audit), failing tests | Unpinned requirements |
 | SQL | Passwords written into SQL, unparseable SQL when `sql.lint: blocking` | DROP, TRUNCATE, DELETE/UPDATE without WHERE, GRANT/REVOKE, user/role changes, dynamic SQL; style (sqlfluff) |
 | Docker | `latest`/untagged base images (hadolint), misconfigurations (trivy config), HIGH/CRITICAL fixable image vulnerabilities, build failure | Other hadolint warnings |
@@ -62,13 +62,29 @@ The `config` job checks the contract first and fails with a clear message when s
 
 New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.yml`.
 
+### Design approval (C47)
+
+Tier 2 and 3 repositories need `docs/DESIGN.md` (template in `starter/docs/`) with a `Threat model` section and without the
+`ndpx:template` marker. A pull request that adds or changes it needs the `design-approved` label from a Code Reviewer who is
+not the author. Imported code gets `design: { gate: warn }` in `.ndpx/pipeline.yml` as a visible temporary waiver.
+
+### Weekly rescan (C33)
+
+`checks.yml` (starter) and `ci.yml` (template) also run every Monday on `main`. A failed scheduled run opens or updates
+the issue "ndpx weekly scan found problems on main" through `scheduled-report.yml`.
+
+### External applications
+
+Publish `templates/security.txt` at `/.well-known/security.txt` (Secure Coding Standard 14.3).
+
 ## Workflows
 
 | Workflow | Called by | Does |
 |---|---|---|
 | `.github/workflows/pr-checks.yml` | app `ci.yml` on every pull request | Common checks (`code-checks.yml`: secrets, Semgrep with TypeScript/React rules, SQL risk report on migrations, AI review with the web rubric), then format, lint, types, tests + coverage, build, browser-bundle secret scan, dependency audit, licences, database migrations + RLS tests + database security checks on a local Supabase, AI security review, Netlify preview + header check + OWASP ZAP baseline. Single required check: **`result`**. |
 | `.github/workflows/code-checks.yml` | `checks.yml` from `starter/`, and `pr-checks.yml` (`profile: web`) | Universal checks above. |
-| `.github/workflows/deploy.yml` | app `deploy.yml` | Staging on merge to `main`. Production only by manual run with a Change Request key; refuses unless Jira Service Management shows it approved for the exact commit. Applies migrations, deploys to Netlify, smoke-tests, rolls back the frontend on failure, records the outcome on the Change Request. |
+| `.github/workflows/scheduled-report.yml` | `checks.yml` / `ci.yml`, failed scheduled runs only | Opens or updates the weekly scan issue. |
+| `.github/workflows/deploy.yml` | app `deploy.yml` | Staging on merge to `main`. Release SBOM artifact. Production only by manual run with a Change Request key; refuses unless Jira Service Management shows it approved for the exact commit. Applies migrations, deploys to Netlify, smoke-tests, rolls back the frontend on failure, records the outcome on the Change Request. |
 
 ## Scripts
 
@@ -84,6 +100,7 @@ New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.y
 | `pr_comment.py` | Upserts pipeline comments on the pull request. |
 | `read_config.py` | Checks the platform contract and reads `.ndpx/pipeline.yml` (risk tier sets the coverage minimum). |
 | `detect_stack.py` | Detects Python, SQL, Docker and npm content and reads `.ndpx/pipeline.yml` for the universal checks. |
+| `design_gate.py` | Design note and `design-approved` label check for Tier 2–3 (C47). |
 | `sql_risk.py` | Blocks passwords in SQL; reports destructive and privilege-changing statements. |
 | `check_coverage.py` | Enforces the tier's line-coverage minimum from the Istanbul summary (any test runner). |
 

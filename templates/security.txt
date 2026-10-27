@@ -1,0 +1,6 @@
+# Place at /.well-known/security.txt on every externally accessible ndpx system
+# (for a Vite app: public/.well-known/security.txt). Secure Coding Standard 14.3.
+Contact: mailto:<monitored ndpx security mailbox>
+Expires: <date within 12 months, e.g. 2027-10-31T00:00:00Z>
+Preferred-Languages: en, ms
+Policy: <link to ndpx vulnerability disclosure statement, if published>

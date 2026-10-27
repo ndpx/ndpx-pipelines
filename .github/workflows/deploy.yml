@@ -40,6 +40,7 @@ env:
   PIPELINES_REPO: ndpx/ndpx-pipelines
   SUPABASE_CLI_VERSION: "2.122.0"
   NETLIFY_CLI_VERSION: "27.14.2"
+  TRIVY_VERSION: "0.76.1"
 
 jobs:
   deploy:
@@ -93,6 +94,21 @@ jobs:
           ref: ${{ inputs.pipelines-ref }}
           path: .ndpx-pipelines
           persist-credentials: false
+
+      - name: "C19 Release SBOM"
+        run: |
+          set -euo pipefail
+          t="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tf="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tf" "$t/$tf"
+          curl -sSfL -o "$RUNNER_TEMP/trivy_checksums.txt" "$t/trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd "$RUNNER_TEMP" && grep " $tf\$" trivy_checksums.txt | sha256sum --check -)
+          tar -xzf "$RUNNER_TEMP/$tf" -C "$RUNNER_TEMP" trivy
+          "$RUNNER_TEMP/trivy" fs --format cyclonedx --output "$RUNNER_TEMP/sbom-${TARGET}-${COMMIT_SHA}.cdx.json" --skip-dirs .ndpx-pipelines .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ runner.temp }}/sbom-*.cdx.json
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -165,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           msg="${COMMIT_SHA:0:7} ${CHANGE_REQUEST:-staging}"
-          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --prod --dir "$BUILD_DIR" --site "$NETLIFY_SITE_ID" \
+          npx --yes "netlify-cli@${NETLIFY_CLI_VERSION}" deploy --no-build --prod --dir "$BUILD_DIR" --site "$NETLIFY_SITE_ID" \
             --auth "$NETLIFY_AUTH_TOKEN" --message "$msg" --json > deploy.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json

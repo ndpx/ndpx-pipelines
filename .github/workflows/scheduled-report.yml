@@ -1,0 +1,31 @@
+# Opens or updates an issue when a scheduled ndpx scan of main fails (check C33).
+# Called by each repository's checks workflow, only for failed scheduled runs.
+name: ndpx scheduled report
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  report:
+    name: Report scheduled failure
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the weekly scan issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="ndpx weekly scan found problems on main"
+          body="The scheduled ndpx checks failed on main: ${RUN_URL}
+          New vulnerabilities in dependencies or container images are the usual cause.
+          Fix within the Vulnerability Management Policy deadlines: Critical 14 days, High 30 days."
+          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"${title}\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

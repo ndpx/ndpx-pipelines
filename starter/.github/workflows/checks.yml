@@ -5,11 +5,14 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  schedule:
+    - cron: "17 1 * * 1" # weekly rescan of main, Monday 09:17 Brunei time (C33)
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: checks-${{ github.event.pull_request.number }}
+  group: checks-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,3 +29,10 @@ jobs:
       ai-review-model: ${{ vars.AI_REVIEW_MODEL }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  report:
+    needs: ndpx
+    if: always() && github.event_name == 'schedule' && needs.ndpx.result == 'failure'
+    uses: ndpx/ndpx-pipelines/.github/workflows/scheduled-report.yml@v1
+    permissions:
+      issues: write

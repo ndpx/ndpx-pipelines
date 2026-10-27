@@ -49,6 +49,17 @@ git config core.autocrlf false
 git remote add origin "$REMOTE"
 cp -R "$STARTER/." .
 sed -i "s/^risk_tier: [0-9]/risk_tier: $TIER/" .ndpx/pipeline.yml
+# Existing code arrives without an approved design note. Record a visible, temporary waiver; remove it once
+# docs/DESIGN.md is complete and approved (Software Delivery Standard 17.1).
+if [ "$TIER" != "1" ]; then
+  printf '\ndesign:\n  gate: warn # TEMPORARY waiver for imported code. Complete docs/DESIGN.md, get it approved, then delete this.\n' >> .ndpx/pipeline.yml
+fi
+# Dependency updates for the package types found in the source folder.
+has() { find "$SRC" -path '*/node_modules' -prune -o -path '*/.git' -prune -o -type f \( "$@" \) -print -quit 2>/dev/null | grep -q .; }
+add_eco() { printf '  - package-ecosystem: %s\n    directories: ["/", "/**/*"]\n    schedule: { interval: weekly }\n    cooldown: { default-days: 7 }\n' "$1" >> .github/dependabot.yml; }
+if has -name 'requirements*.txt' -o -name 'pyproject.toml'; then add_eco pip; fi
+if has -name 'Dockerfile*' -o -name '*.dockerfile'; then add_eco docker; fi
+if has -name 'package.json'; then add_eco npm; fi
 git add -A
 git commit -q -m "Add ndpx pipeline configuration"
 git push -q -u origin main

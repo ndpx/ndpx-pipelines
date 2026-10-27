@@ -9,3 +9,6 @@ python:
 sql:
   dialect: ansi # oracle | sparksql | athena | postgres | mysql | tsql | ansi
   lint: advisory # advisory: report only. blocking: every SQL file must parse.
+
+# design:
+#   gate: enforce # Tier 2-3 need docs/DESIGN.md with a threat model (C47). 'warn' is a temporary waiver only.

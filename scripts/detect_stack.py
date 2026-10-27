@@ -60,9 +60,13 @@ def detect(files: list[str], cfg: dict) -> dict[str, str]:
     tier = int(cfg.get("risk_tier", 2))
     if tier not in (1, 2, 3):
         raise ValueError("risk_tier must be 1, 2 or 3")
+    design_gate = str((cfg.get("design") or {}).get("gate") or "enforce").lower()
+    if design_gate not in ("enforce", "warn"):
+        raise ValueError("design.gate must be 'enforce' or 'warn'")
 
     return {
         "risk_tier": str(tier),
+        "design_gate": design_gate,
         "has_python": str(bool(py)).lower(),
         "has_python_tests": str(bool(py) and has_tests).lower(),
         "python_version": str((cfg.get("python") or {}).get("version") or "3.12"),

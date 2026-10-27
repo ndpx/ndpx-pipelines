@@ -17,6 +17,7 @@ import check_coverage  # noqa: E402
 import check_db_security as dbsec  # noqa: E402
 import check_headers  # noqa: E402
 import check_licenses  # noqa: E402
+import design_gate  # noqa: E402
 import detect_stack  # noqa: E402
 import jsm_change  # noqa: E402
 import read_config  # noqa: E402
@@ -374,3 +375,40 @@ def test_sql_risk_exit_code(tmp_path):
 def test_detect_supabase_defaults_to_postgres():
     out = detect_stack.detect(["package.json", "supabase/migrations/001.sql"], {"risk_tier": 2})
     assert out["sql_dialect"] == "postgres" and out["has_npm"] == "true"
+
+
+# ---------------------------------------------------------------- design_gate
+GOOD_DESIGN = "# Design\n## Threat model (STRIDE)\n| Spoofing | x | y | z |\n"
+
+
+def test_design_tier1_not_applied():
+    problems, _ = design_gate.evaluate(1, None, "", False, None)
+    assert problems == []
+
+
+def test_design_missing_blocks_tier2():
+    problems, _ = design_gate.evaluate(2, None, "", False, None)
+    assert problems and "No design note" in problems[0]
+
+
+def test_design_template_and_no_threat_model():
+    problems, _ = design_gate.evaluate(2, "docs/DESIGN.md", "<!-- ndpx:template -->\n# Design\n", False, None)
+    assert len(problems) == 2
+
+
+def test_design_change_needs_approval():
+    problems, _ = design_gate.evaluate(3, "docs/DESIGN.md", GOOD_DESIGN, True, None)
+    assert problems and "design-approved" in problems[0]
+    problems, notes = design_gate.evaluate(3, "docs/DESIGN.md", GOOD_DESIGN, True, "reviewer1")
+    assert problems == [] and "reviewer1" in notes[0]
+
+
+def test_design_unchanged_good_passes():
+    problems, _ = design_gate.evaluate(2, "docs/DESIGN.md", GOOD_DESIGN, False, None)
+    assert problems == []
+
+
+def test_detect_design_gate_option():
+    assert detect_stack.detect(["a.sql"], {"design": {"gate": "warn"}})["design_gate"] == "warn"
+    with pytest.raises(ValueError):
+        detect_stack.detect(["a.sql"], {"design": {"gate": "off"}})

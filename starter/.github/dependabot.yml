@@ -1,0 +1,8 @@
+# Dependency updates. Each update arrives as a pull request and passes through the normal checks.
+# New releases wait 7 days before being proposed: most malicious package versions are caught within days.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
