@@ -111,6 +111,22 @@ jobs:
         run: ./gitleaks git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" .
       - name: Scan all files
         run: ./gitleaks dir --redact --verbose .
+      - name: Scan full history (first pull request of an existing repository)
+        if: github.event_name == 'pull_request' && github.head_ref == 'ndpx/add-pipeline'
+        # Report only: old commits cannot be fixed by editing files. Real credentials found here must be changed.
+        continue-on-error: true
+        run: |
+          if ./gitleaks git --redact --verbose --report-path history.json .; then
+            echo "### Full history secret scan: nothing found" >> "$GITHUB_STEP_SUMMARY"
+          else
+            n="$(python3 -c 'import json;print(len(json.load(open("history.json"))))')"
+            {
+              echo "### Full history secret scan: ${n} finding(s) in past commits"
+              echo "Old commits stay in history. For each real credential: change it at its source, then confirm here."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::${n} possible secret(s) in past commits. Change any real credential at its source."
+            exit 1
+          fi
 
   sast:
     name: "C07 Static analysis"

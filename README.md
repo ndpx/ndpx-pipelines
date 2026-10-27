@@ -50,15 +50,19 @@ The `config` job checks the contract first and fails with a clear message when s
 | Docker | `latest`/untagged base images (hadolint), misconfigurations (trivy config), HIGH/CRITICAL fixable image vulnerabilities, build failure | Other hadolint warnings |
 | npm (not a web app) | `npm audit` high+ | |
 
-### Bringing existing local code into GitHub
+### Bringing code into GitHub
 
-1. In GitHub create an **empty private** repository in `ndpx` (no README, no .gitignore).
-2. In Git Bash: `bash /c/dev/ndpx-pipelines/tools/onboard.sh "<local folder>" <repo-name> [risk tier]`.
-   The script adds the ndpx files on `main`, copies current files (not old history) onto `import/initial`,
-   leaves out `.env`, keys, certificates, virtual environments and build output, warns about anything that looks like a secret,
-   and prints the pull request link.
-3. Set the repository variable `CODE_REVIEWERS`. Open the pull request; the first run lists everything to fix.
-4. Work from `C:\dev\<repo-name>` from now on: branch, commit, push, pull request.
+Only organisation owners create repositories. Full steps: Platform Administration Runbook, Section 4.
+
+| Where the code is | Command (Git Bash) |
+|---|---|
+| Laptop, OneDrive, personal hosting | Create an empty private repo, then `bash tools/onboard.sh import "<folder>" <repo> <tier>` |
+| Already a repo in `ndpx` | `bash tools/onboard.sh existing <repo> <tier>` |
+| A personal GitHub repo | Transfer it to `ndpx`, then `existing` |
+
+`import` copies current files only onto `import/initial`, leaving out secret files and build output, and asks for
+confirmation if anything looks like a secret. `existing` adds the ndpx files on `ndpx/add-pipeline` without overwriting,
+merges `.gitignore`, and its first pull request also scans the full Git history for secrets (report only).
 
 New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.yml`.
 
