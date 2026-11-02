@@ -8,6 +8,7 @@
 #   ndpx status                                 where am I, what is uncommitted
 #   ndpx rules                                  add or refresh the Git workflow rules in AGENTS.md / CLAUDE.md
 #   ndpx pin                                    pin the production deploy to the current reviewed v1 commit
+#   ndpx sync [--apply]                         compare shared files with the template; --apply copies the latest
 #   ndpx install                                make the `ndpx` command available in Git Bash
 set -euo pipefail
 
@@ -40,7 +41,7 @@ cmd_start() {
     carry=1; say "Moving your uncommitted changes from '$(current)' to the new branch"
     git stash push -q -u -m "ndpx start"
   fi
-  local br="$type/$(slug "$desc")"
+  local br; br="$type/$(slug "$desc")"
   git show-ref --verify --quiet "refs/heads/$br" && { [ $carry -eq 1 ] && git stash pop -q; die "branch $br already exists locally. Choose another description."; }
   say "Updating $main"
   git fetch --prune -q origin
@@ -183,6 +184,54 @@ cmd_pin() {
   say "Production now uses pipeline commit ${sha:0:12} (current v1). Ship this as a normal change: ndpx ship \"Pin production pipeline\""
 }
 
+# Shared files a repository should keep identical to its source (the web app template or starter/).
+# Repository-specific files (CODEOWNERS, .ndpx/pipeline.yml, app code) are never touched.
+WEB_FILES=".github/workflows/ci.yml .github/workflows/deploy.yml .github/dependabot.yml .github/pull_request_template.md .gitattributes .prettierrc.json src/lib/keyGuard.ts src/lib/keyGuard.test.ts"
+STARTER_FILES=".github/workflows/checks.yml .github/dependabot.yml .github/pull_request_template.md .gitattributes"
+
+cmd_sync() {
+  in_repo
+  local apply=0 src kind files f want have state changed=0 pinned=0
+  [ "${1:-}" = "--apply" ] && apply=1
+  if [ -f .github/workflows/ci.yml ] && grep -q 'pr-checks.yml@' .github/workflows/ci.yml; then
+    src="${NDPX_TEMPLATE:-$HERE/../ndpx-webapp-template}"; kind="web app template"; files="$WEB_FILES"
+    [ -d "$src/.git" ] || die "template not found at $src. Run: cd /c/dev && git clone https://github.com/ndpx/ndpx-webapp-template"
+  else
+    src="$HERE"; kind="starter files"; files="$STARTER_FILES"
+  fi
+  git -C "$src" fetch -q origin main || die "cannot update $src; check your network and access."
+  show() { if [ "$kind" = "starter files" ]; then git -C "$src" show "origin/main:starter/$1" 2>/dev/null; else git -C "$src" show "origin/main:$1" 2>/dev/null; fi; }
+  # Production pin lines differ by design; compare deploy.yml as if both were on v1.
+  unpin() { sed -E '/ndpx-production-pin/ s#(deploy\.yml@)[0-9a-f]{40}#\1v1#; /ndpx-production-pin/ s#(pipelines-ref: )[0-9a-f]{40}#\1v1#' | tr -d '\r'; }
+  grep -q 'deploy\.yml@[0-9a-f]\{40\} # ndpx-production-pin' .github/workflows/deploy.yml 2>/dev/null && pinned=1
+  say "Comparing with the latest $kind"
+  for f in $files; do
+    want="$(show "$f" | unpin)" || true
+    [ -n "$want" ] || continue
+    if [ ! -f "$f" ]; then state="missing"
+    else have="$(unpin < "$f")"; [ "$have" = "$want" ] && state="same" || state="differs"; fi
+    printf '   %-8s %s\n' "$state" "$f"
+    if [ "$state" != "same" ]; then
+      changed=1
+      if [ $apply -eq 1 ]; then mkdir -p "$(dirname "$f")"; show "$f" > "$f"; fi
+    fi
+  done
+  if grep -q 'ndpx:git-workflow:start' AGENTS.md 2>/dev/null; then
+    awk '/ndpx:git-workflow:start/,/ndpx:git-workflow:end/' AGENTS.md | tr -d '\r' | cmp -s - <(tr -d '\r' < "$HERE/templates/git-workflow.md") \
+      || echo "   differs  AGENTS.md Git workflow rules (fix with: ndpx rules)"
+  else
+    echo "   missing  AGENTS.md Git workflow rules (fix with: ndpx rules)"
+  fi
+  if [ $changed -eq 0 ]; then say "Shared files match the $kind."; return 0; fi
+  if [ $apply -eq 0 ]; then
+    say "Review what differs: ndpx sync --apply copies the latest versions; git diff shows the change; ndpx ship sends it for review."
+    return 0
+  fi
+  if [ $pinned -eq 1 ]; then cmd_pin >/dev/null; say "Production pin set to the current v1 again."; fi
+  git --no-pager diff --stat
+  say "Copied. Check git diff for anything this repository had changed on purpose, then: ndpx ship \"Sync shared files\""
+}
+
 cmd_install() {
   local line="alias ndpx='bash \"$HERE/tools/ndpx.sh\"'"
   touch ~/.bashrc
@@ -198,6 +247,7 @@ case "${1:-}" in
   status) cmd_status ;;
   rules) cmd_rules ;;
   pin) cmd_pin ;;
+  sync) shift; cmd_sync "$@" ;;
   install) cmd_install ;;
   *) usage ;;
 esac

@@ -72,7 +72,8 @@ New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.y
 main), `ndpx check` (local install, lint, tests, build, audit), `ndpx ship "message"` (check, commit, push, PR link; refuses
 on main or a merged branch), `ndpx done` (back to main, delete branch), `ndpx rules` (add the Git workflow rules from
 `templates/git-workflow.md` to AGENTS.md / CLAUDE.md in an existing repository), `ndpx pin` (pin a web app's production
-deploy to the current `v1` commit; run after every reviewed pipeline release).
+deploy to the current `v1` commit; run after every reviewed pipeline release), `ndpx sync` (list shared files that differ
+from the template or `starter/`; `ndpx sync --apply` copies the latest, keeping the production pin).
 
 ### Design approval (C47)
 
@@ -129,7 +130,7 @@ Environment `staging` and `production` (GitHub Team plan):
 
 ## Releasing a change to the pipeline
 
-1. Pull request here, reviewed by a Code Reviewer. Run `python -m pytest tests` locally first.
+1. Pull request here. `self-test.yml` runs the tests, actionlint, zizmor and shellcheck; the `protect-main` ruleset requires it.
 2. After merge, move the `v1` tag only for backward-compatible changes: `git tag -f v1 && git push -f origin v1`.
    Breaking changes get `v2`; apps move when ready. `pr-checks.yml` calls `code-checks.yml@v1`: change that ref with the major version.
 3. Apps that pin a commit SHA receive the update through Dependabot.
