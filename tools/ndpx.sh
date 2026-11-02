@@ -167,7 +167,13 @@ cmd_rules() {
   fi
   if [ ! -f CLAUDE.md ] || ! grep -q '^@AGENTS.md' CLAUDE.md; then
     { printf '# CLAUDE.md\n\nClaude Code: the rules for this repository are in AGENTS.md. Follow all of them, including the Git workflow.\n\n@AGENTS.md\n'
-      if [ -f CLAUDE.md ] && grep -q '^## Project-specific notes' CLAUDE.md; then echo; sed -n '/^## Project-specific notes/,$p' CLAUDE.md; fi
+      if [ -f CLAUDE.md ]; then
+        if grep -q '^## Project-specific notes' CLAUDE.md; then echo; sed -n '/^## Project-specific notes/,$p' CLAUDE.md
+        elif ! grep -q 'Same content as AGENTS.md' CLAUDE.md; then
+          # Written by hand: keep all of it. Remove anything that repeats AGENTS.md in review.
+          printf '\n## Project-specific notes\n\n'; sed '1{/^# CLAUDE.md/d}' CLAUDE.md
+        fi
+      fi
     } > CLAUDE.md.tmp && mv CLAUDE.md.tmp CLAUDE.md
   fi
   say "AGENTS.md and CLAUDE.md now contain the current Git workflow rules. Ship this as a normal change."
