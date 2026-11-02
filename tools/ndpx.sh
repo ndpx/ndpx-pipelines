@@ -187,7 +187,9 @@ cmd_pin() {
 # Shared files a repository should keep identical to its source (the web app template or starter/).
 # Repository-specific files (CODEOWNERS, .ndpx/pipeline.yml, app code) are never touched.
 WEB_FILES=".github/workflows/ci.yml .github/workflows/deploy.yml .github/dependabot.yml .github/pull_request_template.md .gitattributes .prettierrc.json src/lib/keyGuard.ts src/lib/keyGuard.test.ts"
-STARTER_FILES=".github/workflows/checks.yml .github/dependabot.yml .github/pull_request_template.md .gitattributes"
+# dependabot.yml is not compared for starter repositories: each lists its own package ecosystems.
+# C07 already blocks any Dependabot entry without the 7-day cooldown.
+STARTER_FILES=".github/workflows/checks.yml .github/pull_request_template.md .gitattributes"
 
 cmd_sync() {
   in_repo
@@ -200,14 +202,17 @@ cmd_sync() {
     src="$HERE"; kind="starter files"; files="$STARTER_FILES"
   fi
   git -C "$src" fetch -q origin main || die "cannot update $src; check your network and access."
-  show() { if [ "$kind" = "starter files" ]; then git -C "$src" show "origin/main:starter/$1" 2>/dev/null; else git -C "$src" show "origin/main:$1" 2>/dev/null; fi; }
+  # MSYS2_ARG_CONV_EXCL stops Git Bash on Windows rewriting "origin/main:.github/..." as a Windows path list.
+  ref() { if [ "$kind" = "starter files" ]; then echo "origin/main:starter/$1"; else echo "origin/main:$1"; fi; }
+  show() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git -C "$src" show "$(ref "$1")" 2>/dev/null; }
+  exists() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git -C "$src" cat-file -e "$(ref "$1")" 2>/dev/null; }
   # Production pin lines differ by design; compare deploy.yml as if both were on v1.
   unpin() { sed -E '/ndpx-production-pin/ s#(deploy\.yml@)[0-9a-f]{40}#\1v1#; /ndpx-production-pin/ s#(pipelines-ref: )[0-9a-f]{40}#\1v1#' | tr -d '\r'; }
   grep -q 'deploy\.yml@[0-9a-f]\{40\} # ndpx-production-pin' .github/workflows/deploy.yml 2>/dev/null && pinned=1
   say "Comparing with the latest $kind"
   for f in $files; do
+    if ! exists "$f"; then printf '   %-8s %s (not in the %s; ignored)\n' "skipped" "$f" "$kind"; continue; fi
     want="$(show "$f" | unpin)" || true
-    [ -n "$want" ] || continue
     if [ ! -f "$f" ]; then state="missing"
     else have="$(unpin < "$f")"; [ "$have" = "$want" ] && state="same" || state="differs"; fi
     printf '   %-8s %s\n' "$state" "$f"
