@@ -1,0 +1,8 @@
+# Workflow security policy for ndpx repositories (check C13).
+# ndpx's own pipeline may be referenced by tag (v1) or commit; everything else must be pinned to a full commit SHA.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "ndpx/*": ref-pin
+        "*": hash-pin

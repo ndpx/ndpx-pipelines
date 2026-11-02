@@ -44,7 +44,7 @@ The `config` job checks the contract first and fails with a clear message when s
 
 | Content | Blocking | Reported for the Code Reviewer |
 |---|---|---|
-| Everything | Secrets (gitleaks), Semgrep findings, AI review High/Critical (when enabled), design approval for Tier 2–3 (C47) | AI review Medium/Low; SBOM artifact (C19) |
+| Everything | Workflow security (zizmor with `config/zizmor.yml`: third-party actions pinned to a commit, no `secrets: inherit`, no workflow injection) (C13), secrets (gitleaks), Semgrep findings, AI review High/Critical (when enabled), design approval for Tier 2–3 (C47) | AI review Medium/Low; SBOM artifact (C19) |
 | Python / Glue | Syntax errors and undefined names (ruff), Bandit medium+ severity, vulnerable pinned packages (pip-audit), failing tests | Unpinned requirements |
 | SQL | Passwords written into SQL, unparseable SQL when `sql.lint: blocking` | DROP, TRUNCATE, DELETE/UPDATE without WHERE, GRANT/REVOKE, user/role changes, dynamic SQL; style (sqlfluff) |
 | Docker | `latest`/untagged base images (hadolint), misconfigurations (trivy config), HIGH/CRITICAL fixable image vulnerabilities, build failure | Other hadolint warnings |
@@ -71,7 +71,8 @@ New repository by hand: copy everything in `starter/` and edit `.ndpx/pipeline.y
 `bash tools/ndpx.sh install` adds an `ndpx` command to Git Bash: `ndpx start "description"` (new branch from the latest
 main), `ndpx check` (local install, lint, tests, build, audit), `ndpx ship "message"` (check, commit, push, PR link; refuses
 on main or a merged branch), `ndpx done` (back to main, delete branch), `ndpx rules` (add the Git workflow rules from
-`templates/git-workflow.md` to AGENTS.md / CLAUDE.md in an existing repository).
+`templates/git-workflow.md` to AGENTS.md / CLAUDE.md in an existing repository), `ndpx pin` (pin a web app's production
+deploy to the current `v1` commit; run after every reviewed pipeline release).
 
 ### Design approval (C47)
 

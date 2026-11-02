@@ -45,6 +45,7 @@ env:
   BANDIT_VERSION: "1.9.4"
   PIP_AUDIT_VERSION: "2.10.1"
   SQLFLUFF_VERSION: "4.4.0"
+  ZIZMOR_VERSION: "1.31.1"
   PYYAML_VERSION: "6.0.3"
 
 jobs:
@@ -216,6 +217,30 @@ jobs:
         with:
           name: sbom
           path: sbom.cdx.json
+
+  workflows:
+    name: "C13 Workflow security"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PIPELINES_REPO }}
+          ref: ${{ inputs.pipelines-ref }}
+          path: .ndpx-pipelines
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: zizmor (blocking on medium and high)
+        run: |
+          if [ ! -d .github/workflows ]; then echo "No workflows in this repository."; exit 0; fi
+          pip install "zizmor==${ZIZMOR_VERSION}"
+          zizmor --offline --config .ndpx-pipelines/config/zizmor.yml --min-severity medium --format github .github/workflows
 
   python:
     name: "Python: errors, security lint, dependencies, tests"
@@ -441,7 +466,7 @@ jobs:
 
   result:
     name: result
-    needs: [detect, secrets, sast, design, sbom, python, sql, docker, npm, ai-review]
+    needs: [detect, secrets, sast, design, sbom, workflows, python, sql, docker, npm, ai-review]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
