@@ -193,7 +193,7 @@ STARTER_FILES=".github/workflows/checks.yml .github/pull_request_template.md .gi
 
 cmd_sync() {
   in_repo
-  local apply=0 src kind files f want have state changed=0 pinned=0
+  local apply=0 src kind files f want have state changed=0 pinned=0 compared=0
   [ "${1:-}" = "--apply" ] && apply=1
   if [ -f .github/workflows/ci.yml ] && grep -q 'pr-checks.yml@' .github/workflows/ci.yml; then
     src="${NDPX_TEMPLATE:-$HERE/../ndpx-webapp-template}"; kind="web app template"; files="$WEB_FILES"
@@ -202,10 +202,11 @@ cmd_sync() {
     src="$HERE"; kind="starter files"; files="$STARTER_FILES"
   fi
   git -C "$src" fetch -q origin main || die "cannot update $src; check your network and access."
-  # MSYS2_ARG_CONV_EXCL stops Git Bash on Windows rewriting "origin/main:.github/..." as a Windows path list.
+  # The conversion variables stop Git Bash on Windows rewriting "origin/main:.github/..." as a Windows path list.
   ref() { if [ "$kind" = "starter files" ]; then echo "origin/main:starter/$1"; else echo "origin/main:$1"; fi; }
-  show() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git -C "$src" show "$(ref "$1")" 2>/dev/null; }
-  exists() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git -C "$src" cat-file -e "$(ref "$1")" 2>/dev/null; }
+  # Run inside $src (a subshell cd) so no POSIX path is passed as an argument while conversion is off.
+  show() { (cd "$src" && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git show "$(ref "$1")" 2>/dev/null); }
+  exists() { (cd "$src" && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' git cat-file -e "$(ref "$1")" 2>/dev/null); }
   # Production pin lines differ by design; compare deploy.yml as if both were on v1.
   unpin() { sed -E '/ndpx-production-pin/ s#(deploy\.yml@)[0-9a-f]{40}#\1v1#; /ndpx-production-pin/ s#(pipelines-ref: )[0-9a-f]{40}#\1v1#' | tr -d '\r'; }
   grep -q 'deploy\.yml@[0-9a-f]\{40\} # ndpx-production-pin' .github/workflows/deploy.yml 2>/dev/null && pinned=1
@@ -213,6 +214,7 @@ cmd_sync() {
   for f in $files; do
     if ! exists "$f"; then printf '   %-8s %s (not in the %s; ignored)\n' "skipped" "$f" "$kind"; continue; fi
     want="$(show "$f" | unpin)" || true
+    compared=$((compared + 1))
     if [ ! -f "$f" ]; then state="missing"
     else have="$(unpin < "$f")"; [ "$have" = "$want" ] && state="same" || state="differs"; fi
     printf '   %-8s %s\n' "$state" "$f"
@@ -227,6 +229,7 @@ cmd_sync() {
   else
     echo "   missing  AGENTS.md Git workflow rules (fix with: ndpx rules)"
   fi
+  if [ $compared -eq 0 ]; then die "could not read any file from $src. Check it is a clone of the right repository, then: git -C \"$src\" fetch origin"; fi
   if [ $changed -eq 0 ]; then say "Shared files match the $kind."; return 0; fi
   if [ $apply -eq 0 ]; then
     say "Review what differs: ndpx sync --apply copies the latest versions; git diff shows the change; ndpx ship sends it for review."
