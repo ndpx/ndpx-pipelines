@@ -7,13 +7,14 @@
 #   ndpx done                                   after merge: back to main, update, delete the branch
 #   ndpx status                                 where am I, what is uncommitted
 #   ndpx rules                                  add or refresh the Git workflow rules in AGENTS.md / CLAUDE.md
+#   ndpx pin                                    pin the production deploy to the current reviewed v1 commit
 #   ndpx install                                make the `ndpx` command available in Git Bash
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "ndpx: $*" >&2; exit 1; }
 say() { echo "== $*"; }
-usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
 
 in_repo() { git rev-parse --show-toplevel >/dev/null 2>&1 || die "not inside a Git repository. cd into C:\\dev\\<repo> first."; cd "$(git rev-parse --show-toplevel)"; }
 default_branch() {
@@ -171,6 +172,17 @@ cmd_rules() {
   say "AGENTS.md and CLAUDE.md now contain the current Git workflow rules. Ship this as a normal change."
 }
 
+cmd_pin() {
+  in_repo
+  local f=.github/workflows/deploy.yml sha
+  [ -f "$f" ] && grep -q 'ndpx-production-pin' "$f" || die "no production pin markers in $f (web apps from the template only)."
+  git -C "$HERE" fetch -q --tags --force origin || die "cannot update $HERE; check your network and access."
+  sha="$(git -C "$HERE" rev-parse 'v1^{commit}')" || die "tag v1 not found in $HERE."
+  sed -i -E "/ndpx-production-pin/ s#(deploy\.yml@)[^ ]+#\1${sha}#; /ndpx-production-pin/ s#(pipelines-ref: )[^ ]+#\1${sha}#" "$f"
+  git --no-pager diff --stat -- "$f"
+  say "Production now uses pipeline commit ${sha:0:12} (current v1). Ship this as a normal change: ndpx ship \"Pin production pipeline\""
+}
+
 cmd_install() {
   local line="alias ndpx='bash \"$HERE/tools/ndpx.sh\"'"
   touch ~/.bashrc
@@ -185,6 +197,7 @@ case "${1:-}" in
   done) shift; cmd_done ;;
   status) cmd_status ;;
   rules) cmd_rules ;;
+  pin) cmd_pin ;;
   install) cmd_install ;;
   *) usage ;;
 esac
